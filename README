@@ -1,0 +1,82 @@
+This version implements the support for Multipath TCP.
+
+It affects the way TCP is handled by adding a packet type for TCP options.  It
+also adds a packet type MPTCP as subtype of a TCP option (see
+scapy/layers/mptcp.py for details).
+
+You can use the script "launcher" to start scapy with the modified script. It
+works only if you are in the same directory that the python "scapy" module.
+
+EXAMPLE RUN
+===========
+
+$ ./launcher
+Welcome to Scapy (2.2.0)
+>>> a=rdpcap("dumps/mptcp-capable.pcap")
+>>> a
+<mptcp-capable.pcap: TCP:1 UDP:0 ICMP:0 Other:0>
+>>> a[0]
+<CookedLinux  pkttype=sent-by-us lladdrtype=0x1 lladdrlen=6 src='\x00%\xb3\x02\xd24' proto=0x800 |<IP  version=4L ihl=5L tos=0x0 len=80 id=32501 flags=DF frag=0L ttl=64 proto=tcp chksum=0xa5a7 src=10.0.1.11 dst=10.0.1.1 options=[] |<TCP  sport=44437 dport=www seq=559395504 ack=169850675 dataofs=15L reserved=0L flags=A window=28 chksum=0x164e urgptr=0 options=[<TCPOption_NOP  kind=NOP |>, <TCPOption_NOP  kind=NOP |>, <TCPOption_Timestamp  kind=Timestamp length=10 timestamp_value=183387 timestamp_echo=178863 |>, <TCPOption_MP  kind=MpTCP mptcp=<MPTCP_Capable  length=20 subtype=MP_CAPABLE version=0L checksum_req=1L reserved=0L hmac_sha1=1L snd_key=1815828401224581229 rcv_key=8653733315196113643 |> |>, <TCPOption_MP  kind=MpTCP mptcp=<MPTCP_AddAddr  length=8 subtype=ADD_ADDR ipver=4L address_id=1 adv_addr=10.0.0.7 |> |>] |>>>
+>> a[0].show2()
+###[ cooked linux ]###
+  pkttype= sent-by-us
+  lladdrtype= 0x1
+  lladdrlen= 6
+  src= '\x00%\xb3\x02\xd24'
+  proto= 0x800
+###[ IP ]###
+     version= 4L
+     ihl= 5L
+     tos= 0x0
+     len= 80
+     id= 32501
+     flags= DF
+     frag= 0L
+     ttl= 64
+     proto= tcp
+     chksum= 0xa5a7
+     src= 10.0.1.11
+     dst= 10.0.1.1
+     \options\
+###[ TCP ]###
+        sport= 44437
+        dport= www
+        seq= 559395504
+        ack= 169850675
+        dataofs= 15L
+        reserved= 0L
+        flags= A
+        window= 28
+        chksum= 0x164e
+        urgptr= 0
+        \options\
+         |###[ No Operation ]###
+         |  kind= NOP
+         |###[ No Operation ]###
+         |  kind= NOP
+         |###[ Timestamp ]###
+         |  kind= Timestamp
+         |  length= 10
+         |  timestamp_value= 183387
+         |  timestamp_echo= 178863
+         |###[ Multipath TCP option ]###
+         |  kind= MpTCP
+         |  \mptcp\
+         |   |###[ Multipath TCP capability ]###
+         |   |  length= 20
+         |   |  subtype= MP_CAPABLE
+         |   |  version= 0L
+         |   |  checksum_req= 1L
+         |   |  reserved= 0L
+         |   |  hmac_sha1= 1L
+         |   |  snd_key= 1815828401224581229
+         |   |  rcv_key= 8653733315196113643
+         |###[ Multipath TCP option ]###
+         |  kind= MpTCP
+         |  \mptcp\
+         |   |###[ Multipath TCP Add Address ]###
+         |   |  length= 8
+         |   |  subtype= ADD_ADDR
+         |   |  ipver= 4L
+         |   |  address_id= 1
+         |   |  adv_addr= 10.0.0.7

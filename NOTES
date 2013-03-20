@@ -1,0 +1,28 @@
+- Pour le MP_CAPABLE: il n'y a aucun requirement par rapport à la présence de
+  rcv_key et snd_key. Ils semblent obligatoires, mais ce n'est pas dit
+  explicitement, ni quand il le sont.
+
+- Bug encore semble encore présent 
+
+- 192.135.167.249 semble ne pas répondre en mptcp (pas de mp_capable)
+
+
+============= 24/11/2011 =============
+
+- Il semblerait que les traces mpTCP que j'ai reçues de Fabien ne suivent pas
+  exactement le draft. En l'occurence, dumps/badDSSpacket.pcap contient un
+  paquet utilisant l'option Data Sequence Signal avec une longueur de 8. Ce qui,
+  selon le draft, ne devrait pas être possible si les flags a et A sont activés
+  comme c'est le cas: 
+   F=0 m=1 M=0 a=1 A=1
+  Cette erreur revient à plusieurs reprises dans le dump fourni.
+  -> Meeting 24/11: bug corrigé dans les dernières versions
+
+- Il y a quelque chose qui me perturbe avec le checksum de DSS. Le flag M
+  spécifie la présence du checksum ou pas. Cependant, à la fin du paragraphe de
+  la section 3.3, il est indiqué: 
+    "The presence of the checksum can be inferred from the length of the option."
+  Est-ce que le fait que M=0 n'assure pas qu'il n'y ait pas de checksum ?
+  -> Meeting 24/11: checksum présent si "c" est set (négocié avec MP_CAPABLE)
+    -> Corrigé dans scapy en se référant à length pour déterminer la présence du
+    checksum.
