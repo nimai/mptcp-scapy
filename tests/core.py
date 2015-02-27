@@ -1,5 +1,6 @@
 #!/usr/bin/env python2
 from scapy.all import sr1, send, sniff, UDP
+from threading import Thread
 import random
 import socket, select
 import inspect
@@ -10,9 +11,9 @@ DEFAULT_CONF = {"check":False,  # if True, check received packets using check
                 "printanswer":False,  
                 "iptables_bin": "iptables", # iptables executable path
                 "udp_port": 3456,
+                "udp_port_ack": 3457,
                 }
 
-# Exception class for PacketWaiting timeout handling
 class PktWaitTimeOutException(Exception):
     def __init__(self, timeval):
         self.timeval = timeval
@@ -20,11 +21,7 @@ class PktWaitTimeOutException(Exception):
         return repr(self.timeval)
 
 class ProtoTester(object):
-    """Main class of the core
-    This defines the protocol-independent mechanism of the tester."""
-
     def __init__(self, conf=DEFAULT_CONF):
-        # merge the config given in argument with the default one.
         self.conf = dict(DEFAULT_CONF.items() + conf.items())
         self.first = True
         # If True, allows kernel to see packets and interact with connection
@@ -34,9 +31,6 @@ class ProtoTester(object):
         self.proto = None
 
     def sendSequence(self, pktList, initstate=None, **kargs):
-        """Send a sequence of packets with the synchronous sendpkt.
-        The pktList is composed of classes of the protocol library.
-        Returns a list of tuples (packetSent, validityOfReply, reply, state)""" 
         if "buffermode" in kargs:
             raise Exception("Buffermode cannot be used with sendSequence()")
         return [self.sendpkt(pkt, initstate, **kargs) for pkt in pktList]
@@ -45,16 +39,17 @@ class ProtoTester(object):
     def sendpkt(self, newpkt, initstate=None, **kargs):
         """Generate and send a new packet
         
-        Generate a new packet using the class newpkt, from existing current
+        Generate a new packet using the function newpkt, from existing current
         state overriden by initstate, then send it.
-        Return a tuple (sent packet, validityOfReply, reply, new state)
+        Return a tuple (sent packet, reply, new state)
         
         Arguments:
-        newpkt -- class derived from ProtoLibPacket that represents the scapy packet to send.
-        initstate -- state class (derived from ProtoState) overriding the current state. 
-        kargs -- other optional arguments to be passed to the newpkt methods
+        newpkt -- function to generate the scapy packet to send. It must have
+                  at least have a state dictionnary as first parameter
+        initstate -- state overriding the current state. 
+        testfct -- optional function used to check the validity of a reply
+        kargs -- other optional arguments to be passed to the newpkt function
         """
-        # update the State
         if self.state is None:
             if initstate is None:
                 # If no initial state is given at the first call, use a generic one
@@ -67,15 +62,14 @@ class ProtoTester(object):
         
         if self.first:
             self.first = False
+#        elif not s.getLastPacket():
+#            raise Exception("no previous packet, can't resume the protocol")
 
         try:
-            # generate the packet
             (pkt, wait) = newpkt().generate(s, **kargs)
         
             if s.hasKey("stage") and pkt is not None:
                 self.debug("Generating %s packet..." % s["stage"], 1)
-            # send the packet and possibly wait for the reply if wait is
-            # defined by the generation
             r = self.run(s, pkt, wait)
             if type(r) is list: # buffermode
                 return r
@@ -84,6 +78,7 @@ class ProtoTester(object):
 
         except PktWaitTimeOutException as e:
             raise e
+#PktWaitTimeOutException(e.
         except Exception as e:
             import sys
             if self.conf["debug"]:
@@ -97,20 +92,13 @@ class ProtoTester(object):
 
 
     def run(self, state, pkt, wait):
-        """Send pkt, receive the answer if wait is defined, and return a tuple 
-        (validity of reply packet, reply packet).
-        
-        pkt -- is a scapy representation of a packet. It can be None.
-        wait -- If defined, it can either be a boolean, or a function 
-        describing how to wait for a packet, or a tuple (function,
-        maxTimeToWait, activationOfBufferMode)
-        
-        Returns a (validityOfReply, replyPacket) tuple"""
-
+        """Send pkt, receive the answer if wait is True, and return a tuple 
+        (validity of reply packet, reply packet). If no test function is
+        given, assume it's valid."""
         self.dbgshow(pkt)
         if wait: # do we wait for a reply ?
+            self.debug("Waiting for packet...", level=1)
             if pkt is None:
-                self.debug("Waiting for packet...", level=1)
                 timeout, buffermode = None, False
                 if type(wait) is tuple:
                     wait, timeout, buffermode = wait
@@ -123,26 +111,22 @@ class ProtoTester(object):
                 else:
                     raise Exception("error, no packet generated.")
             else:
-                # when no wait function is specified, use the original scapy sender and
-                # receiver.
                 ans=sr1(pkt)
         else:
-            # send the packet without waiting any reply.
             send(pkt)
             self.first = True # prev_pkt shouldnt be taken into account
             self.debug("Packet sent, no waiting, going on with next.",2)
             return (True, None) # no reply, no check
-        return self.packetReceived(ans) # callback for received reply
+        return self.packetReceived(ans) # post-reply actions
 
-    def waitForPacket(self, state=None, filterfct=None, timeout=None,
+    def waitForPacket(self, state=None, filterfct=None, timeout=5,
             buffermode=False, **kargs):
         """Wait for one packet matching a filter function
 
-        filterfct -- boolean function applied on a packet received to select it
+        state: initial state, may be empty but should be a valid state
+            instance.
+        filterfct: boolean function applied on a packet received to select it
             or not. Ex: lambda pkt: pkt.haslayer("TCP")
-        buffermode -- If True, stores until a UDP packet is received, then
-            treat them all. Allows to receive several packets without dropping
-            any due to synchronicity.
         other args: extra args for sniff function of scapy"""
 
         if state is None:
@@ -161,16 +145,14 @@ class ProtoTester(object):
             # to user only when a UDP signal is encountered
             buf = sniff(count=0, lfilter=lambda pkt: filterfct(pkt) or \
                     pkt.haslayer(UDP), filter="udp or tcp",
-                    stop_filter=lambda pkt: pkt.haslayer(UDP),
+                    stop_filter=lambda pkt: pkt.haslayer(UDP) and \
+                            str(pkt.payload) == "EOD",
                     timeout=timeout, **kargs)
-            # acknowledge the UDP signal
             self.sendAck(buf[-1].getlayer("IP").src)
             return buf[:-1]
         
-        # wait for a single packet matching the filterfct requirement
         pkts = sniff(count=1, lfilter=filterfct, filter="tcp",
                     timeout=timeout, **kargs)
-        # notify caller of a timeout
         if pkts is None or len(pkts) == 0:
             raise PktWaitTimeOutException(timeout)
         return pkts[0].getlayer("IP")
@@ -178,21 +160,16 @@ class ProtoTester(object):
 
     def packetReceived(self, pkt, buffermode=False):
         """Called when a packet pkt is received, returns the packet and its
-        supposed validity expressed as a boolean. This updates the state
-        according to the recv() method of the packet received."""
+        supposed validity expressed as a boolean"""
         initstate = self.state.copy()
         self.printrcvd(pkt)
         self.state.logPacket(pkt)
         pktTest = None
-        # Retrieve the components class to handle in a receivd packet
         finder = self.proto.findProtoLayer(pkt)
         self.debug("Packets components to handle: %s" % [a for a in finder], 4)
         finder = self.proto.findProtoLayer(pkt)
         if not finder:
             return (False, pkt)
-        # loop on the components, ensure that they are bound to a
-        # ProtoLibPacket class, if not, ask the proto to recognize it and
-        # return the corresponding ProtoLibPacket class.
         for p in finder:
             if "recv" in dir(p):
                 pktTest = p
@@ -201,13 +178,8 @@ class ProtoTester(object):
             valid = self.checkRcvd(initstate, pkt, pktTest)
             if not valid:
                 return (False, pkt)
-            # update the state according to packet received
             needReply = pktTest.recv(self.state, pkt)
-            if needReply and buffermode: 
-                # useful for acks: in buffermode (or data receiving mode), the
-                # remote host expects acks that must be generated according to
-                # the data received. Only an ACK would be enough, but send one
-                # for each anyway.
+            if needReply and buffermode: # useful for acks
                 self.sendpkt(needReply)
         return (True, pkt)
 
@@ -255,32 +227,43 @@ class ProtoTester(object):
             os.system("%s -D INPUT -p tcp -j DROP" % self.conf["iptables_bin"])
             self.khandled = True
         elif enable is False or self.khandled is True:
+            #os.system("%s -P INPUT DROP" % self.conf["iptables_bin"])
             os.system("%s -A INPUT -p tcp -j DROP" % self.conf["iptables_bin"])
             self.khandled = False
 
     # For purpose of communication with the other test instance.
-    def sendState(self, state=None, dst=None):
-        """Send state in its network representation to dst, using UDP"""
-        if dst is None and state and state.hasKey("dst"):
-            dst = state["dst"]
-        elif dst is None:
-            raise Exception("no destination found for sending state")
-        if state is None:
-            data = "unit"
-        else:
-            data = state.toNetwork()
-        self.debug("UDP signal sent to %s: %s" % (dst,data), 5)
+    def sendData(self, data, dst, dport=None, ackMsg="ack"):
+        if dst is None:
+            raise Exception("no destination found for sending control data")
+        if dport is None:
+            dport = self.conf["udp_port"]
         outsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        outsock.sendto(data, (dst, self.conf["udp_port"]))
-        sock.bind(('', self.conf["udp_port"])) # wait for ack
-        while not select.select([sock], [], [],0.1)[0]:
-            outsock.sendto(data, (dst, self.conf["udp_port"]))
-        sock.recvfrom(10)
+        sock.bind(('', self.conf["udp_port_ack"])) # wait for ack
+        outsock.sendto(data, (dst, dport))
+        self.debug("UDP packet sent to %s: %s" % (dst,data), 5)
+        if not ackMsg:
+            self.debug("UDP: not waiting for an ACK",5)
+            outsock.close()
+            sock.close()
+            return
+        # while no ack, retransmit the packet every 0.1 sec
+        rcvdMsg = ""
+        while rcvdMsg != ackMsg:
+            self.debug("UDP: waiting for ACK on %i" % self.conf["udp_port_ack"], 5)
+            while not select.select([sock], [], [],0.2)[0]:
+                outsock.sendto(data, (dst, dport))
+            rcvdMsg, anaddr = sock.recvfrom(10)
+        self.debug("UDP: ACK received", 5)
         sock.close()
         outsock.close()
-        
-    def receiveState(self, cls=None, src=None, bindTo=''):
+    
+    def sendAck(self,addr):
+        outsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        outsock.sendto("ack", (addr, self.conf["udp_port_ack"]))
+        outsock.close()
+    
+    def receiveData(self, src=None, bindTo=''):
         """Wait to receive state in its network representation from src, using UDP
         Return the state as a dictionary"""
         sock = socket.socket( socket.AF_INET, socket.SOCK_DGRAM)
@@ -288,23 +271,65 @@ class ProtoTester(object):
         data, addr = sock.recvfrom( 2048 )
         self.debug("Received data from %s: '%s'"%(addr,data))
         while src is not None and addr[0] != src:
+            self.debug("Not from expected source %s, waiting for another udp packet"%src)
             data, addr = sock.recvfrom( 2048 )
             self.debug("Received data from %s: '%s'"%(addr,data))
         sock.close()
         self.sendAck(addr[0])
-        if cls is None: return # for sync purposes, give up data
-        return cls.fromNetwork(data)
+        return data
+    
+        
+    def sendState(self, state=None, dst=None):
+        """Send state in its network representation to dst, using UDP"""
+        if dst is None and state and state.hasKey("dst"):
+            dst = state["dst"]
+        self.sendData(state.toNetwork(), dst)
+    
+    def receiveState(self, cls=None, src=None, bindTo=''):
+        if cls is None:
+            cls = ProtoState
+        return cls.fromNetwork(self.receiveData(src=src, bindTo=bindTo))
+    
+    def syncWait(self, src=None):
+        """Useful for synchronization between client and server. It is used
+        asymmetrically. This is one is a blocking call that waits until it
+        receives a synchronization signal using UDP
+        @param src: source IP of the sync signal"""
+        self.debug("Waits for other side to be in-sync")
+        self.receiveData(src=src)
 
-    def sendAck(self,addr):
-        """Send an UDP acknowledgment to ensure synchronization of tester
-        instances"""
-        outsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        outsock.sendto("ack", (addr, self.conf["udp_port"]))
-        outsock.close()
+    def syncReady(self, dst, msg="unit"):
+        """Useful for synchronization between client and server. It is used
+        asymmetrically. This is one is a non-blocking call that notify the
+        remote host that it is ready to continue.
+        @param dst: destination IP of the sync signal"""
+        self.debug("Ready for sync")
+        Thread(target=self.sendData, args=(msg, dst)).start()
+
+    def notifyEndOfData(self, dst):
+        self.syncReady(dst, msg="EOD")
+
+    def getTestResult(self, src=None, criterion=lambda r: r[0] == "unit" and r[1] == True):
+        """Get results from a test which depends on a remote operation, 
+        sent from src, with the criterion of success criterion which must be
+        a function of the tuple-interpreted value of the received result"""
+        import ast
+        res = ast.literal_eval(self.receiveData(src=src))
+        if not isinstance(res, tuple):
+            raise Exception("Test result not in expected format")
+        return criterion(res)
+
+    def sendTestResult(self, result, dst=None):
+        """Send test results to dst. result shoud be a tuple (type, value).
+        For example ("unit", True) means a success with the default criterion."""
+        self.sendData(str(result), dst)
+
+    def fwCmd(self, cmd, dst=None, dport=None):
+        self.sendData("FWCMD %s" % cmd, dst, dport=5005, ackMsg="fwack")
+
+    
 
 class ProtoLibPacket(object):
-    """Represents the actions applyable to a packet type. The packet specified
-    for sending must use a derived class (or one that implements) of this one."""
     def generate(self, state):
         """Describe the packet to send for the class's packet type""" 
         pass
@@ -318,11 +343,7 @@ class ProtoLibPacket(object):
 
 
 class ProtoState(object):
-    """Abstract class.
-    This represents the state of a protocol. Protocol libraries should use
-    this as a base class for use with this test engine"""
     def __init__(self, initstate={},conf=DEFAULT_CONF):
-        # the internal state is implemented with a dictionary d.
         self.d = {}
         self.initAttr()
         self.update(initstate)
@@ -337,10 +358,10 @@ class ProtoState(object):
             print("[%s] %s"%(self.name,str))
 
     def __getitem__(self, attr):
+        """ with the state dictionary"""
         return self.d[attr]
 
     def __setitem__(self, attr, val):
-        # called for modifying a state value. Also useful for debugging.
         if attr in ["ack", "seq"]:
             self.debug("%s: %i --> %i"% (attr, self.d[attr],val), level=5)
             self.debug(inspect.stack(), level=5)
@@ -387,7 +408,7 @@ class ProtoState(object):
             return None
 
     
-# useful functions in the context of protocol testing
+
 def xlong(s):
     """Convert a string into a long integer"""
     l = len(s)-1

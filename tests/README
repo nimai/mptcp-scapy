@@ -1,0 +1,3 @@
+fwudpserver.py must be launched on firewall
+testserver.py must be launched on server
+testall.sh must be launched on client to begin the tests

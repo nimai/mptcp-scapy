@@ -22,8 +22,6 @@ from scapy.automaton import Automaton,ATMT
 
 import scapy.as_resolvers
 
-#from scapy.layers.inet6 import IP6Field #XXX to support IPv6 in mptcp
-
 ####################
 ## IP Tools class ##
 ####################

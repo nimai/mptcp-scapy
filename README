@@ -10,7 +10,7 @@ works only if you are in the same directory that the python "scapy" module.
 EXAMPLE RUN
 ===========
 
-$ ./launcher
+$ ./laucher
 Welcome to Scapy (2.2.0)
 >>> a=rdpcap("dumps/mptcp-capable.pcap")
 >>> a
