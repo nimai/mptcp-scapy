@@ -316,7 +316,7 @@ class MPTCP_DSS_Ack64Map64(MPOption):
     name = "Multipath TCP Data Sequence Signal"
     subtype = 2
     subsubtype = 26<<4+2
-    fields_desc = [ ByteField("length", 26),
+    fields_desc = [ ByteField("length", 28),
                     _DSS_HDR,
                     FlagsField("flags", "mMaA", 5, "AaMmF"),
                     LongField("data_ack", 0),

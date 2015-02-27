@@ -330,10 +330,10 @@ extensions_paths: path or list of paths where extensions are to be looked for
     checkIPsrc = 1
     checkIPaddr = 1
     check_TCPerror_seqack = 0
-    verb = 0
+    verb = 1
     prompt = ">>> "
     promisc = 0
-    sniff_promisc = 0
+    sniff_promisc = 1
     raw_layer = None
     raw_summary = False
     default_l2 = None

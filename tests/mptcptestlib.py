@@ -81,8 +81,8 @@ def genDSSChecksum(dsn, ssn, datalen, payload):
     return checksum(header+payload)
 
 def getDataAckForPkt(s, sub, l4, plen, f=False):
-    # should update the data_ack only if the map is relative to this
-    # data segment.
+    """Update the data_ack only if the map is relative to this
+    data segment."""
     if sub["map"] and (l4.seq > sub["map"]["subseq"]+sub["startseq"]\
             and l4.seq < sub["map"]["subseq"]+sub["startseq"] + plen or f):
         if f and sub["map"]["subseq"] == 0: subseq = 1
@@ -98,24 +98,17 @@ def get32bitSeq(seq64):
     seq32 = seq64 % (1 << 32) 
     return seq32
 
-def kernelEstablishConn(t, mptcp, s, dst=None, dport=80):
-    """Make the kernel establish a TCP connection (MPTCP if available in 
-    the kernel) to dst"""
-    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    exchange = [mptcp.cap_syn, mptcp.cap_synack, mptcp.ack]
-    self.sock.connect((dst, dport))
 
 #############################################################################
 
 class MPTCPTest(object):
     """MPTCP Test library
 
-    Set of methods to test an MPTCP extension implementation. 
-    It works together with the test framework.
-    Each method uses and maintains a connection state. Every data useful for
-    the packet generation should be stored in that object. 
-    It also contains a model of the last received packet if there is one.
-    Operations involving subflows are provided with a specific subflow state."""
+    Set of classes to test an MPTCP extension implementation. 
+    It provides a library of ProtoLibPacket's derivatives for use with the
+    test engine.
+    Each method of those classes uses and maintains a connection state, that is, MPTCPState and
+    SubflowState. They all take them as parameter."""
     
     def __init__(self, tester=None, initstate=None):
         self.tester = tester
@@ -136,6 +129,7 @@ class MPTCPTest(object):
         for p in mp:
             i += 1
             yield p
+        # if no MPTCP option is present, uses the default TCP class.
         if i==0:
             yield pkt.getlayer("TCP")
         
@@ -176,7 +170,7 @@ class MPTCPTest(object):
             # Identifies this connection stage (packet type) by a name 
             s["stage"] = "MP_CAPABLE SYN"
             # The destination is expected to reply to this packet
-            waitForReply = False
+            waitForReply = True
             return (pkt, waitForReply)
         
         def recv(self, s, pkt):
@@ -215,11 +209,13 @@ class MPTCPTest(object):
                         )
             sub["seq"] = (sub["seq"]+1) % (1<<32)   
             s["stage"] = "MP_CAPABLE SYNACK"
-            waitForReply = False
+            waitForReply = True
             return (pkt, waitForReply)
 
             
         def recv(self, s, pkt):
+            """update the state with the key and sequence mumber embedded in
+            the received MPCapableSYNACK packet"""
             # retrieve reply's data
             sub = s.getSubflowFromPkt(pkt)
             (l4, opt) = checkAndGetMPOption(pkt, "MP_CAPABLE") 
@@ -227,7 +223,7 @@ class MPTCPTest(object):
             s["rcv_key"] = opt.snd_key
             s["rcv_token"], s["data_ack"] = key2tokenAndDSN(s["rcv_key"])
             sub["ack"] = l4.seq+1
-            sub["rem_startseq"] = l4.seq # FIXME: is reached?
+            sub["rem_startseq"] = l4.seq
     
         
     class CapACK(ProtoLibPacket, MPTCP_CapableACK):
@@ -295,8 +291,7 @@ class MPTCPTest(object):
                         snd_nonce=sub["snd_nonce"],))])
             sub["seq"] = (sub["seq"]+1) % (1<<32)   
             s["stage"] = "MP_JOIN SYN"
-            waitForReply = False
-            return (pkt, waitForReply)
+            return (pkt, True)
             
         def recv(self, s, pkt):
             (l4, opt) = checkAndGetMPOption(pkt, "MP_JOIN") 
@@ -341,9 +336,7 @@ class MPTCPTest(object):
                         ])
             sub["seq"] = (sub["seq"]+1) % (1<<32)
             s["stage"] = "MP_JOIN SYNACK"
-            
-            waitForReply = False
-            return (pkt, waitForReply)
+            return (pkt, True)
         
         def recv(self, s, pkt):
             (l4, opt) = checkAndGetMPOption(pkt, "MP_JOIN") 
@@ -372,9 +365,8 @@ class MPTCPTest(object):
                         snd_mac=sub["snd_mac"],))])
             s["stage"] = "MP_JOIN ACK"
             #sub["seq"] = (sub["seq"]+1) % (1<<32)
-            #return (pkt, False) # FIXME : should be True according to draft
-            waitForReply = False
-            return (pkt, waitForReply)
+            return (pkt, False) # should be True according to draft,
+                            #but would not work with old linux mptcp implem
 
         def recv(self, s, pkt):
             (l4, opt) = checkAndGetMPOption(pkt, "MP_JOIN") 
@@ -424,6 +416,8 @@ class MPTCPTest(object):
 
         def recv(self, s, pkt):
             (l4, opt) = checkAndGetMPOption(pkt, "DSS") 
+            # only needs the TCP packet handling for dataack receiving since
+            # no state is maintained for window checking
             return MPTCPTest.TCPPacket().recv(s, pkt)
 
 
@@ -492,9 +486,9 @@ class MPTCPTest(object):
             (pkt, wait) = p.generate(s, payload="", length=1, checksum=checksum, sub=sub,
                     subseq=0,
                     f=True)
-            waitForReply = False
-            return (pkt, waitForReply)
-    DSSFINACK = DSSFIN
+            return (pkt, True)
+
+    DSSFINACK = DSSFIN # alias for sending
 
     
     class DSS(ProtoLibPacket, MPTCP_DSS, #MPTCP_DSS_AckMapCsum,
@@ -551,7 +545,8 @@ class MPTCPTest(object):
     
     def send_data_sub(self, s, data, sub=None, imap=[0], waitAck=False):
         """Send data using subflow sub. Split in several TCP segments if datalength is
-        greater than mss"""
+        greater than mss. Classic round robin scheduling for subflows
+        assignment"""
         if sub is None: sub = s.getDefaultSubflow()
         length = len(data)
         checksum = genDSSChecksum(s["dsn"], sub["seq"]-sub["startseq"], 
@@ -607,13 +602,14 @@ class MPTCPTest(object):
             sub["seq"] += plen 
             s["dsn"] += plen 
             
-            #if f or waitAck: # or payload
-            #    waitForReply = True
-            #else:
-            waitForReply = False
+            if f or waitAck: # or payload
+                waitForReply=True
+            else:
+                waitForReply = False
             return (pkt, waitForReply)
             
         def recv(self, s, pkt):
+            """update the state at the reception of a regular TCP packet"""
             # retrieve reply's data
             l4 = pkt.getlayer("TCP") 
             sub = s.getSubflowFromPkt(pkt)
@@ -644,7 +640,9 @@ class MPTCPTest(object):
 
 
     class Wait(ProtoLibPacket):
-        def generate(self, s, sub=None, waitfct=None, timeout=3,
+        """Special packet that does not elicit any packet sending. Instead, it
+        makes the tester instance wait according to its send parameters"""
+        def generate(self, s, sub=None, waitfct=None, timeout=None,
                 buffermode=False):
             if waitfct:
                 if sub is None:
@@ -689,6 +687,7 @@ class MPTCPTest(object):
 
 
 class SubflowState(ProtoState):
+    """Subflow connection representation"""
     def __init__(self, mpconn, initstate={},conf=None):
         if conf: ProtoState.__init__(self, initstate=initstate, conf=conf)
         else: ProtoState.__init__(self, initstate=initstate)
@@ -696,7 +695,7 @@ class SubflowState(ProtoState):
         self.name = "Subflow"
 
     def initAttr(self):
-        # per subflow
+        """initial values of the subflows attributes"""
         self.d["snd_nonce"] = 0
         self.d["rcv_nonce"] = 0
         self.d["snd_mac"] = 0
@@ -713,9 +712,12 @@ class SubflowState(ProtoState):
                 self.d["sport"])
 
     def getIndex(self):
+        """Get the index of the subflow relative to the list of subflows
+        maintained by its master MPTCP connection"""
         return self.mpconn.sub.index(self)
 
     def isPacketFromSubflow(self, rawpkt):
+        """Tells if a scapy packet is part of this subflow"""
         if not rawpkt.haslayer(TCP): return False
         pkt = rawpkt.getlayer("IP")
         tupleid = self.getId()
@@ -770,11 +772,13 @@ class MPTCPState(ProtoState):
         self.d["data_ack"] = 0
 
     def createSubflow(self, dst, src, dport=80, sport=0):
+        """Create and return a subflow from TCP 4-tuple."""
         if sport == 0: sport = random.randrange(1025,2<<15)
         return SubflowState(mpconn=self, 
                 initstate={"dst":dst, "src":src, "dport":dport,"sport":sport})
 
     def registerSubflow(self, ss):
+        """Register an existing subflow to this MPTCP connection"""
         for sub in self.sub:
             if ss.getId() == sub.getId():
                 self.debug("subflow %s already exists" % ss.getId())
@@ -785,6 +789,7 @@ class MPTCPState(ProtoState):
         return ss
 
     def registerNewSubflow(self, **kargs):
+        """Create and register a new subflow"""
         return self.registerSubflow(self.createSubflow(**kargs))
 
     def getSubflow(self, subflow):
@@ -806,7 +811,7 @@ class MPTCPState(ProtoState):
                 sport=pkt.dport)
 
     def getSubflowFromPkt(self, pkt):
-        """return the subflow on which the packet has been received"""
+        """return the subflow on which the packet pkt has been received"""
         if self.sub:
             for sub in self.sub:
                 if sub.isPacketFromSubflow(pkt):
